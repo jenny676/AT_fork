@@ -23,9 +23,12 @@
   "eval_on_cpu": false,
 
   "_comment": "=====ADVERSARIAL EXAMPLES CONFIGURATION=====",
-  "epsilon": 8.0,
+  "epsilon": 0.03137254901960784,   // 8/255
   "num_steps": 10,
-  "step_size": 2.0,
+  "step_size": 0.00784313725490196, // 2/255
+  "eval_num_steps": 20,
+  "eval_restarts": 5,
+  "eval_batch_size": 100
   "random_start": true,
   "loss_func": "xent",
   "store_adv_path": "attack.npy"
