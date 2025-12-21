@@ -1,5 +1,6 @@
 """Trains a model, saving checkpoints and tensorboard summaries along
-   the way."""
+   the way. Modified to run PGD-10 training and PGD-20 evaluation logging.
+"""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -9,6 +10,7 @@ import json
 import os
 import shutil
 from timeit import default_timer as timer
+import math
 
 import tensorflow as tf
 import numpy as np
@@ -19,6 +21,12 @@ from pgd_attack import LinfPGDAttack
 
 with open('config.json') as config_file:
     config = json.load(config_file)
+
+# optional extra config defaults for evaluation
+# (if not present in config.json these defaults will be used)
+EVAL_NUM_STEPS = config.get('eval_num_steps', 20)    # PGD-20 for eval
+EVAL_RESTARTS = config.get('eval_restarts', 5)      # 5 restarts recommended
+EVAL_BATCH_SIZE = config.get('eval_batch_size', config.get('eval_batch_size', 256))
 
 # seeding randomness
 tf.set_random_seed(config['tf_random_seed'])
@@ -53,7 +61,7 @@ train_step = tf.train.MomentumOptimizer(learning_rate, momentum).minimize(
     total_loss,
     global_step=global_step)
 
-# Set up adversary
+# Set up adversary for training (uses config['num_steps'], e.g. 10)
 attack = LinfPGDAttack(model,
                        config['epsilon'],
                        config['num_steps'],
@@ -61,16 +69,19 @@ attack = LinfPGDAttack(model,
                        config['random_start'],
                        config['loss_func'])
 
+# Set up adversary for evaluation (PGD-20). This is separate so we can evaluate
+# with PGD-20 while training uses PGD-10.
+eval_attack = LinfPGDAttack(model,
+                           config['epsilon'],
+                           EVAL_NUM_STEPS,
+                           config['step_size'],
+                           config['random_start'],
+                           config['loss_func'])
+
 # Setting up the Tensorboard and checkpoint outputs
 model_dir = config['model_dir']
 if not os.path.exists(model_dir):
   os.makedirs(model_dir)
-
-# We add accuracy and xent twice so we can easily make three types of
-# comparisons in Tensorboard:
-# - train vs eval (for a single run)
-# - train of different runs
-# - eval of different runs
 
 saver = tf.train.Saver(max_to_keep=3)
 tf.summary.scalar('accuracy adv train', model.accuracy)
@@ -83,9 +94,75 @@ merged_summaries = tf.summary.merge_all()
 # keep the configuration file with the model for reproducibility
 shutil.copy('config.json', model_dir)
 
+# Helper: write metrics line as JSON into metrics.jsonl
+def append_metrics(out_dir, metrics):
+    fname = os.path.join(out_dir, "metrics.jsonl")
+    with open(fname, "a") as fh:
+        fh.write(json.dumps(metrics) + "\n")
+
+# Helper: evaluate model on eval set with PGD-20 and multiple restarts
+def evaluate_checkpoint(sess, cifar_augmented, eval_attack, eval_batch_size, eval_restarts):
+    """Returns (clean_acc, robust_acc_pgd20) on the full eval set.
+
+    Robustness is estimated by running `eval_restarts` random-start PGD attacks and
+    marking an example as robust only if it remains correctly classified under ALL restarts
+    (this is the 'worst-case over restarts' behaviour).
+    """
+    # reset eval pointer if CIFAR wrapper uses an internal pointer
+    # The CIFAR10Data implementation in Madry's repo uses get_next_batch on eval_data,
+    # which advances a pointer. There's no explicit reset API exposed here, so we rely
+    # on reading exactly num_examples via successive calls.
+    num_eval = cifar_augmented.eval_data.num_examples
+    num_batches = int(math.ceil(num_eval / eval_batch_size))
+
+    total = 0
+    correct_clean = 0
+    correct_robust = 0
+
+    # iterate over the eval set once
+    for _ in range(num_batches):
+        x_batch_eval, y_batch_eval = cifar_augmented.eval_data.get_next_batch(eval_batch_size, multiple_passes=False)
+
+        # clean accuracy (single forward)
+        nat_dict = {model.x_input: x_batch_eval, model.y_input: y_batch_eval}
+        clean_acc_batch = sess.run(model.accuracy, feed_dict=nat_dict)
+        batch_size_actual = x_batch_eval.shape[0]
+        correct_clean += clean_acc_batch * batch_size_actual
+
+        # robust check across restarts:
+        # robust_mask[i] remains True only if example i is correctly predicted in every restart.
+        robust_mask = np.ones(batch_size_actual, dtype=np.bool)
+
+        for r in range(eval_restarts):
+            # produce adversarial examples with eval_attack (PGD-20)
+            x_batch_adv = eval_attack.perturb(x_batch_eval, y_batch_eval, sess)
+
+            # Get per-example predictions on adversarial images.
+            # We expect the Model to expose a per-example prediction tensor, e.g. model.predictions
+            # If your Model doesn't have `predictions`, replace with the appropriate op that yields
+            # per-example argmax logits (for example: sess.run(tf.argmax(model.pre_softmax,1), ...))
+            try:
+                preds = sess.run(model.predictions, feed_dict={model.x_input: x_batch_adv})
+            except AttributeError:
+                # fallback: try to compute argmax of model.pre_softmax if available
+                try:
+                    preds = sess.run(tf.argmax(model.pre_softmax, 1), feed_dict={model.x_input: x_batch_adv})
+                except Exception:
+                    raise RuntimeError("Model doesn't expose 'predictions' or 'pre_softmax'. Please modify the code to obtain per-example predictions.")
+
+            # update robust mask: must be correct on this restart as well
+            robust_mask &= (preds == y_batch_eval)
+
+        correct_robust += robust_mask.sum()
+        total += batch_size_actual
+
+    clean_acc = float(correct_clean) / total
+    robust_acc = float(correct_robust) / total
+    return clean_acc, robust_acc
+
 with tf.Session() as sess:
 
-  # initialize data augmentation
+  # initialize data augmentation (keeps internal train/eval pointers)
   cifar = cifar10_input.AugmentedCIFAR10Data(raw_cifar, sess, model)
 
   # Initialize the summary writer, global variables, and our time counter.
@@ -98,7 +175,7 @@ with tf.Session() as sess:
     x_batch, y_batch = cifar.train_data.get_next_batch(batch_size,
                                                        multiple_passes=True)
 
-    # Compute Adversarial Perturbations
+    # Compute Adversarial Perturbations (training PGD, e.g. PGD-10)
     start = timer()
     x_batch_adv = attack.perturb(x_batch, y_batch, sess)
     end = timer()
@@ -126,14 +203,25 @@ with tf.Session() as sess:
       summary = sess.run(merged_summaries, feed_dict=adv_dict)
       summary_writer.add_summary(summary, global_step.eval(sess))
 
-    # Write a checkpoint
+    # Write a checkpoint AND evaluate (PGD-20) and log metrics
     if ii % num_checkpoint_steps == 0:
       saver.save(sess,
                  os.path.join(model_dir, 'checkpoint'),
                  global_step=global_step)
 
-    # Actual training step
-    start = timer()
-    sess.run(train_step, feed_dict=adv_dict)
-    end = timer()
-    training_time += end - start
+      # Run evaluation on the full eval set using eval_attack (PGD-20)
+      print("Running PGD-{} evaluation ({} restarts) at step {}...".format(EVAL_NUM_STEPS, EVAL_RESTARTS, ii))
+      eval_start = timer()
+      clean_acc, robust_acc = evaluate_checkpoint(sess, cifar, eval_attack, EVAL_BATCH_SIZE, EVAL_RESTARTS)
+      eval_end = timer()
+      print(" Eval done in {:.2f}s - clean_acc: {:.4f}, robust_pgd{}_acc: {:.4f}".format(eval_end - eval_start, clean_acc, EVAL_NUM_STEPS, robust_acc))
+
+      # assemble metrics and append to metrics.jsonl
+      metrics = {
+          "global_step": int(sess.run(global_step)),
+          "step": int(ii),
+          "clean_acc": float(clean_acc),
+          "robust_pgd{}_acc".format(EVAL_NUM_STEPS): float(robust_acc),
+          "eval_restarts": int(EVAL_RESTARTS),
+          "timestamp": datetim
+
