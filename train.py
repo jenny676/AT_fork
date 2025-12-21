@@ -8,6 +8,8 @@ from __future__ import print_function
 from datetime import datetime
 import json
 import os
+import csv
+import time
 import shutil
 from timeit import default_timer as timer
 import math
@@ -24,24 +26,24 @@ with open('config.json') as config_file:
 
 # optional extra config defaults for evaluation
 # (if not present in config.json these defaults will be used)
-EVAL_NUM_STEPS = config.get('eval_num_steps', 20)    # PGD-20 for eval
-EVAL_RESTARTS = config.get('eval_restarts', 5)      # 5 restarts recommended
-EVAL_BATCH_SIZE = config.get('eval_batch_size', config.get('eval_batch_size', 256))
+EVAL_NUM_STEPS = int(config.get('eval_num_steps', 20))    # PGD-20 for eval
+EVAL_RESTARTS = int(config.get('eval_restarts', 5))      # 5 restarts recommended
+EVAL_BATCH_SIZE = int(config.get('eval_batch_size', 256))
 
 # seeding randomness
-tf.set_random_seed(config['tf_random_seed'])
-np.random.seed(config['np_random_seed'])
+tf.set_random_seed(int(config['tf_random_seed']))
+np.random.seed(int(config['np_random_seed']))
 
 # Setting up training parameters
-max_num_training_steps = config['max_num_training_steps']
-num_output_steps = config['num_output_steps']
-num_summary_steps = config['num_summary_steps']
-num_checkpoint_steps = config['num_checkpoint_steps']
+max_num_training_steps = int(config['max_num_training_steps'])
+num_output_steps = int(config['num_output_steps'])
+num_summary_steps = int(config['num_summary_steps'])
+num_checkpoint_steps = int(config['num_checkpoint_steps'])
 step_size_schedule = config['step_size_schedule']
-weight_decay = config['weight_decay']
+weight_decay = float(config['weight_decay'])
 data_path = config['data_path']
-momentum = config['momentum']
-batch_size = config['training_batch_size']
+momentum = float(config['momentum'])
+batch_size = int(config['training_batch_size'])
 
 # Setting up the data and the model
 raw_cifar = cifar10_input.CIFAR10Data(data_path)
@@ -63,19 +65,19 @@ train_step = tf.train.MomentumOptimizer(learning_rate, momentum).minimize(
 
 # Set up adversary for training (uses config['num_steps'], e.g. 10)
 attack = LinfPGDAttack(model,
-                       config['epsilon'],
-                       config['num_steps'],
-                       config['step_size'],
-                       config['random_start'],
+                       float(config['epsilon']),
+                       int(config['num_steps']),
+                       float(config['step_size']),
+                       bool(config['random_start']),
                        config['loss_func'])
 
 # Set up adversary for evaluation (PGD-20). This is separate so we can evaluate
 # with PGD-20 while training uses PGD-10.
 eval_attack = LinfPGDAttack(model,
-                           config['epsilon'],
+                           float(config['epsilon']),
                            EVAL_NUM_STEPS,
-                           config['step_size'],
-                           config['random_start'],
+                           float(config['step_size']),
+                           bool(config['random_start']),
                            config['loss_func'])
 
 # Setting up the Tensorboard and checkpoint outputs
@@ -100,108 +102,112 @@ def append_metrics(out_dir, metrics):
     with open(fname, "a") as fh:
         fh.write(json.dumps(metrics) + "\n")
 
-# Helper: evaluate model on eval set with PGD-20 and multiple restarts
-def evaluate_checkpoint(sess, cifar_augmented, eval_attack, eval_batch_size, eval_restarts):
-    """Returns (clean_acc, robust_acc_pgd20) on the full eval set.
+# ---- CSV helpers ----------------------------------------------------------
+METRICS_CSV = os.path.join(model_dir, "metrics.csv")
 
-    Robustness is estimated by running `eval_restarts` random-start PGD attacks and
-    marking an example as robust only if it remains correctly classified under ALL restarts
-    (this is the 'worst-case over restarts' behaviour).
-    """
-    # reset eval pointer if CIFAR wrapper uses an internal pointer
-    # The CIFAR10Data implementation in Madry's repo uses get_next_batch on eval_data,
-    # which advances a pointer. There's no explicit reset API exposed here, so we rely
-    # on reading exactly num_examples via successive calls.
-    num_eval = cifar_augmented.eval_data.num_examples
-    num_batches = int(math.ceil(num_eval / eval_batch_size))
+def init_metrics_csv(path=METRICS_CSV):
+  header = ["epoch","train_time","test_time","lr",
+            "train_loss","train_acc","train_robust_loss","train_robust_acc",
+            "test_loss","test_acc","test_robust_loss","test_robust_acc"]
+  if not os.path.exists(path):
+    with open(path, "w", newline='') as fh:
+      writer = csv.writer(fh)
+      writer.writerow(header)
 
-    total = 0
-    correct_clean = 0
-    correct_robust = 0
+def append_metrics_csv(row, path=METRICS_CSV):
+  """Row is an iterable of values in same order as header."""
+  with open(path, "a", newline='') as fh:
+    writer = csv.writer(fh)
+    writer.writerow(row)
 
-    # iterate over the eval set once
-    for _ in range(num_batches):
-        x_batch_eval, y_batch_eval = cifar_augmented.eval_data.get_next_batch(eval_batch_size, multiple_passes=False)
+# ---- dataset metrics computation -----------------------------------------
+def compute_dataset_metrics(sess, data_obj, attack_obj, batch_size, restarts):
+  """
+  Compute:
+    - clean mean loss (model.mean_xent) and accuracy (model.num_correct / N)
+    - robust mean loss and robust accuracy (PGD attack applied, worst-over-restarts semantics)
+  Returns:
+    (mean_clean_loss, clean_acc, mean_robust_loss, robust_acc, elapsed_seconds)
+  """
+  t0 = time.time()
+  total_clean_loss = 0.0
+  total_robust_loss = 0.0
+  total_corr_clean = 0
+  total_corr_robust = 0
 
-        # clean accuracy (single forward)
-        nat_dict = {model.x_input: x_batch_eval, model.y_input: y_batch_eval}
-        clean_acc_batch = sess.run(model.accuracy, feed_dict=nat_dict)
-        batch_size_actual = x_batch_eval.shape[0]
-        correct_clean += clean_acc_batch * batch_size_actual
+  N = int(getattr(data_obj, "num_examples", (data_obj.xs.shape[0] if hasattr(data_obj, "xs") else 0)))
+  num_batches = int(math.ceil(N / float(batch_size)))
 
-        # robust check across restarts:
-        # robust_mask[i] remains True only if example i is correctly predicted in every restart.
-        robust_mask = np.ones(batch_size_actual, dtype=np.bool)
+  for ibatch in range(num_batches):
+    bstart = ibatch * batch_size
+    bend = min(bstart + batch_size, N)
 
-        for r in range(eval_restarts):
-            # produce adversarial examples with eval_attack (PGD-20)
-            x_batch_adv = eval_attack.perturb(x_batch_eval, y_batch_eval, sess)
+    x_batch = data_obj.xs[bstart:bend].astype(np.float32)
+    y_batch = data_obj.ys[bstart:bend]
 
-            # Get per-example predictions on adversarial images.
-            # We expect the Model to expose a per-example prediction tensor, e.g. model.predictions
-            # If your Model doesn't have `predictions`, replace with the appropriate op that yields
-            # per-example argmax logits (for example: sess.run(tf.argmax(model.pre_softmax,1), ...))
-            try:
-                preds = sess.run(model.predictions, feed_dict={model.x_input: x_batch_adv})
-            except AttributeError:
-                # fallback: try to compute argmax of model.pre_softmax if available
-                try:
-                    preds = sess.run(tf.argmax(model.pre_softmax, 1), feed_dict={model.x_input: x_batch_adv})
-                except Exception:
-                    raise RuntimeError("Model doesn't expose 'predictions' or 'pre_softmax'. Please modify the code to obtain per-example predictions.")
+    # clean metrics
+    feed_nat = {model.x_input: x_batch, model.y_input: y_batch}
+    cur_corr_nat, cur_loss_nat = sess.run([model.num_correct, model.mean_xent], feed_dict=feed_nat)
+    total_corr_clean += int(cur_corr_nat)
+    total_clean_loss += float(cur_loss_nat) * (bend - bstart)  # mean_xent -> multiply back by batch size
 
-            # update robust mask: must be correct on this restart as well
-            robust_mask &= (preds == y_batch_eval)
+    # robust (adversarial) metrics: craft adversarial examples with restarts
+    x_batch_adv = attack_obj.perturb(x_batch, y_batch, sess, restarts=restarts)
+    feed_adv = {model.x_input: x_batch_adv, model.y_input: y_batch}
+    cur_corr_adv, cur_loss_adv = sess.run([model.num_correct, model.mean_xent], feed_dict=feed_adv)
+    total_corr_robust += int(cur_corr_adv)
+    total_robust_loss += float(cur_loss_adv) * (bend - bstart)
 
-        correct_robust += robust_mask.sum()
-        total += batch_size_actual
+  # get means
+  mean_clean_loss = total_clean_loss / float(N)
+  clean_acc = float(total_corr_clean) / float(N)
+  mean_robust_loss = total_robust_loss / float(N)
+  robust_acc = float(total_corr_robust) / float(N)
+  elapsed = time.time() - t0
+  return mean_clean_loss, clean_acc, mean_robust_loss, robust_acc, elapsed
 
-    clean_acc = float(correct_clean) / total
-    robust_acc = float(correct_robust) / total
-    return clean_acc, robust_acc
+# NOTE: we removed the older evaluate_checkpoint helper to avoid duplication.
+# compute_dataset_metrics is used for both train and test evaluations.
 
 with tf.Session() as sess:
 
   # initialize data augmentation (keeps internal train/eval pointers)
-   cifar = cifar10_input.AugmentedCIFAR10Data(raw_cifar, sess, model)
-   train_frac = float(config.get('train_frac', 1.0))
-   if train_frac <= 0 or train_frac > 1.0:
-     raise ValueError("config['train_frac'] must be in (0,1]. Got: {}".format(train_frac))
-   
-   # Only subsample if train_frac < 1.0
-   if train_frac < 1.0:
-     # Get original arrays (AugmentedCIFAR10Data keeps underlying arrays on train_data.xs / ys)
-     try:
-       xs = cifar.train_data.xs
-       ys = cifar.train_data.ys
-     except AttributeError:
-       raise RuntimeError("cifar.train_data does not expose .xs/.ys; adapt subsample code to your data loader.")
-   
-     num_total = xs.shape[0]
-     num_keep = int(np.floor(num_total * train_frac))
-     if num_keep < 1:
-       raise ValueError("train_frac too small, resulting in zero examples to train on")
-   
-     # deterministic sampling per run using config['train_frac_seed'] combined with global seed
-     frac_seed = int(config.get('train_frac_seed', 0))
-     # create rng seeded by (global np_random_seed, frac_seed) for repeatability
-     rng = np.random.RandomState(seed=(int(config.get('np_random_seed', 0)) + frac_seed))
-   
-     perm = rng.permutation(num_total)
-     keep_idx = np.sort(perm[:num_keep])  # sort to keep natural order if desired
-   
-     # subsample the CIFAR training arrays in-place so the rest of the repo continues to work
-     cifar.train_data.xs = xs[keep_idx].copy()
-     cifar.train_data.ys = ys[keep_idx].copy()
-     # update num_examples so get_next_batch and epoch math work
-     cifar.train_data.num_examples = cifar.train_data.xs.shape[0]
-   
-     print("Subsampled training set: keeping {}/{} examples ({:.2%})".format(
-         num_keep, num_total, train_frac))
+  cifar = cifar10_input.AugmentedCIFAR10Data(raw_cifar, sess, model)
 
+  # optional: subsample training set according to config['train_frac']
+  train_frac = float(config.get('train_frac', 1.0))
+  if train_frac <= 0 or train_frac > 1.0:
+    raise ValueError("config['train_frac'] must be in (0,1]. Got: {}".format(train_frac))
+
+  if train_frac < 1.0:
+    try:
+      xs = cifar.train_data.xs
+      ys = cifar.train_data.ys
+    except AttributeError:
+      raise RuntimeError("cifar.train_data does not expose .xs/.ys; adapt subsample code to your data loader.")
+
+    num_total = xs.shape[0]
+    num_keep = int(np.floor(num_total * train_frac))
+    if num_keep < 1:
+      raise ValueError("train_frac too small, resulting in zero examples to train on")
+
+    frac_seed = int(config.get('train_frac_seed', 0))
+    rng = np.random.RandomState(seed=(int(config.get('np_random_seed', 0)) + frac_seed))
+
+    perm = rng.permutation(num_total)
+    keep_idx = np.sort(perm[:num_keep])  # sort to keep natural order if desired
+
+    cifar.train_data.xs = xs[keep_idx].copy()
+    cifar.train_data.ys = ys[keep_idx].copy()
+    cifar.train_data.num_examples = cifar.train_data.xs.shape[0]
+
+    print("Subsampled training set: keeping {}/{} examples ({:.2%})".format(
+        num_keep, num_total, train_frac))
 
   # Initialize the summary writer, global variables, and our time counter.
   summary_writer = tf.summary.FileWriter(model_dir, sess.graph)
+  # ensure metrics CSV has header
+  init_metrics_csv()
   sess.run(tf.global_variables_initializer())
   training_time = 0.0
 
@@ -222,7 +228,8 @@ with tf.Session() as sess:
     adv_dict = {model.x_input: x_batch_adv,
                 model.y_input: y_batch}
 
-    # Output to stdout
+    # ------------------- OUTPUT & SUMMARIES -------------------
+    # Output to stdout (train-time quick stats)
     if ii % num_output_steps == 0:
       nat_acc = sess.run(model.accuracy, feed_dict=nat_dict)
       adv_acc = sess.run(model.accuracy, feed_dict=adv_dict)
@@ -233,30 +240,96 @@ with tf.Session() as sess:
         print('    {} examples per second'.format(
             num_output_steps * batch_size / training_time))
         training_time = 0.0
+
     # Tensorboard summaries
     if ii % num_summary_steps == 0:
       summary = sess.run(merged_summaries, feed_dict=adv_dict)
       summary_writer.add_summary(summary, global_step.eval(sess))
 
-    # Write a checkpoint AND evaluate (PGD-20) and log metrics
+    # Ensure CSV exists (first checkpoint will create header)
+    # Call once before first checkpoint
+    if ii == 0:
+      init_metrics_csv()
+
+    # Write a checkpoint, evaluate (PGD-20) and append metrics CSV/JSONL
     if ii % num_checkpoint_steps == 0:
       saver.save(sess,
                  os.path.join(model_dir, 'checkpoint'),
                  global_step=global_step)
 
-      # Run evaluation on the full eval set using eval_attack (PGD-20)
+      # ------------------- EVAL (TEST) -------------------
       print("Running PGD-{} evaluation ({} restarts) at step {}...".format(EVAL_NUM_STEPS, EVAL_RESTARTS, ii))
       eval_start = timer()
-      clean_acc, robust_acc = evaluate_checkpoint(sess, cifar, eval_attack, EVAL_BATCH_SIZE, EVAL_RESTARTS)
+      test_loss, test_acc, test_robust_loss, test_robust_acc, test_time = compute_dataset_metrics(
+          sess,
+          cifar.eval_data,
+          eval_attack,
+          batch_size=int(config.get('eval_batch_size', EVAL_BATCH_SIZE)),
+          restarts=int(config.get('eval_restarts', EVAL_RESTARTS))
+      )
       eval_end = timer()
-      print(" Eval done in {:.2f}s - clean_acc: {:.4f}, robust_pgd{}_acc: {:.4f}".format(eval_end - eval_start, clean_acc, EVAL_NUM_STEPS, robust_acc))
+      print(" Eval done in {:.2f}s - clean_acc: {:.4f}, robust_pgd{}_acc: {:.4f}".format(
+          eval_end - eval_start, test_acc, EVAL_NUM_STEPS, test_robust_acc))
 
-      # assemble metrics and append to metrics.jsonl
+      # ------------------- EVAL (TRAIN) -------------------
+      print("Computing train-set metrics (this may be slow)...")
+      train_start = timer()
+      train_loss, train_acc, train_robust_loss, train_robust_acc, train_time_epoch = compute_dataset_metrics(
+          sess,
+          cifar.train_data,
+          eval_attack,   # use PGD-20 for comparable robust metrics
+          batch_size=int(config.get('eval_batch_size', EVAL_BATCH_SIZE)),
+          restarts=int(config.get('eval_restarts', EVAL_RESTARTS))
+      )
+      train_end = timer()
+      print(" Train eval done in {:.2f}s - train_acc: {:.4f}, train_robust_acc: {:.4f}".format(
+          train_end - train_start, train_acc, train_robust_acc))
+
+      # ------------------- LEARNING RATE -------------------
+      try:
+        current_lr = float(sess.run(learning_rate))
+      except Exception:
+        current_lr = float(config.get('initial_learning_rate', 0.0))
+
+      # ------------------- write JSONL metrics (optional) -------------------
       metrics = {
           "global_step": int(sess.run(global_step)),
           "step": int(ii),
-          "clean_acc": float(clean_acc),
-          "robust_pgd{}_acc".format(EVAL_NUM_STEPS): float(robust_acc),
+          "clean_acc": float(test_acc),
+          "robust_pgd{}_acc".format(EVAL_NUM_STEPS): float(test_robust_acc),
+          "train_clean_acc": float(train_acc),
+          "train_robust_acc": float(train_robust_acc),
           "eval_restarts": int(EVAL_RESTARTS),
-          "timestamp": datetim
+          "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+      }
+      append_metrics(model_dir, metrics)
 
+      # ------------------- append CSV row -------------------
+      # Row order:
+      # epoch,train_time,test_time,lr,
+      # train_loss,train_acc,train_robust_loss,train_robust_acc,
+      # test_loss,test_acc,test_robust_loss,test_robust_acc
+      row = [
+        int(ii),
+        float(train_time_epoch),
+        float(test_time),
+        float(current_lr),
+        float(train_loss),
+        float(train_acc),
+        float(train_robust_loss),
+        float(train_robust_acc),
+        float(test_loss),
+        float(test_acc),
+        float(test_robust_loss),
+        float(test_robust_acc)
+      ]
+      append_metrics_csv(row)
+
+    # ------------------- ACTUAL TRAINING STEP -------------------
+    start = timer()
+    sess.run(train_step, feed_dict=adv_dict)
+    end = timer()
+    training_time += end - start
+
+  # end training loop
+# end session
