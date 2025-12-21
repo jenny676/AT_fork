@@ -1,4 +1,5 @@
-# based on https://github.com/tensorflow/models/tree/master/resnet
+# model.py
+# Standard ResNet-18 adapted for CIFAR (TF1 style)
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -7,7 +8,7 @@ import numpy as np
 import tensorflow as tf
 
 class Model(object):
-  """ResNet model."""
+  """ResNet-18 model for CIFAR-10."""
 
   def __init__(self, mode):
     """ResNet constructor.
@@ -26,77 +27,98 @@ class Model(object):
     return [1, stride, stride, 1]
 
   def _build_model(self):
-    assert self.mode == 'train' or self.mode == 'eval'
-    """Build the core model within the graph."""
+    assert self.mode in ('train', 'eval')
     with tf.variable_scope('input'):
-
-      self.x_input = tf.placeholder(
-        tf.float32,
-        shape=[None, 32, 32, 3])
-
+      # Inputs: expect pixel-valued images (0..255). Keep per-image standardization here,
+      # but you can switch to dataset normalization if desired.
+      self.x_input = tf.placeholder(tf.float32, shape=[None, 32, 32, 3])
       self.y_input = tf.placeholder(tf.int64, shape=None)
 
-
+      # keep behavior similar to prior code: per-image standardization
       input_standardized = tf.map_fn(lambda img: tf.image.per_image_standardization(img),
-                               self.x_input)
-      x = self._conv('init_conv', input_standardized, 3, 3, 16, self._stride_arr(1))
+                                    self.x_input)
 
+      # Initial conv: 3x3, 64 filters, stride 1
+      x = self._conv('init_conv', input_standardized, filter_size=3,
+                     in_filters=3, out_filters=64, strides=self._stride_arr(1))
 
+    # ResNet-18: 4 stages, each with 2 basic blocks.
+    # channels per stage: 64, 128, 256, 512
+    x = self._resnet_stage(x, 64, 2, name='stage1', first_stride=1)
+    x = self._resnet_stage(x, 128, 2, name='stage2', first_stride=2)
+    x = self._resnet_stage(x, 256, 2, name='stage3', first_stride=2)
+    x = self._resnet_stage(x, 512, 2, name='stage4', first_stride=2)
 
-    strides = [1, 2, 2]
-    activate_before_residual = [True, False, False]
-    res_func = self._residual
-
-    # wide residual network (https://arxiv.org/abs/1605.07146v1)
-    # use filters = [16, 16, 32, 64] for a non-wide version
-    filters = [16, 160, 320, 640]
-
-
-    # Update hps.num_residual_units to 9
-
-    with tf.variable_scope('unit_1_0'):
-      x = res_func(x, filters[0], filters[1], self._stride_arr(strides[0]),
-                   activate_before_residual[0])
-    for i in range(1, 5):
-      with tf.variable_scope('unit_1_%d' % i):
-        x = res_func(x, filters[1], filters[1], self._stride_arr(1), False)
-
-    with tf.variable_scope('unit_2_0'):
-      x = res_func(x, filters[1], filters[2], self._stride_arr(strides[1]),
-                   activate_before_residual[1])
-    for i in range(1, 5):
-      with tf.variable_scope('unit_2_%d' % i):
-        x = res_func(x, filters[2], filters[2], self._stride_arr(1), False)
-
-    with tf.variable_scope('unit_3_0'):
-      x = res_func(x, filters[2], filters[3], self._stride_arr(strides[2]),
-                   activate_before_residual[2])
-    for i in range(1, 5):
-      with tf.variable_scope('unit_3_%d' % i):
-        x = res_func(x, filters[3], filters[3], self._stride_arr(1), False)
-
-    with tf.variable_scope('unit_last'):
+    with tf.variable_scope('post'):
       x = self._batch_norm('final_bn', x)
-      x = self._relu(x, 0.1)
+      x = self._relu(x, 0.0)
       x = self._global_avg_pool(x)
 
     with tf.variable_scope('logit'):
       self.pre_softmax = self._fully_connected(x, 10)
 
+    # Predictions & metrics (same API as before)
     self.predictions = tf.argmax(self.pre_softmax, 1)
     self.correct_prediction = tf.equal(self.predictions, self.y_input)
-    self.num_correct = tf.reduce_sum(
-        tf.cast(self.correct_prediction, tf.int64))
-    self.accuracy = tf.reduce_mean(
-        tf.cast(self.correct_prediction, tf.float32))
+    self.num_correct = tf.reduce_sum(tf.cast(self.correct_prediction, tf.int64))
+    self.accuracy = tf.reduce_mean(tf.cast(self.correct_prediction, tf.float32))
 
     with tf.variable_scope('costs'):
       self.y_xent = tf.nn.sparse_softmax_cross_entropy_with_logits(
-          logits=self.pre_softmax, labels=self.y_input)
+        logits=self.pre_softmax, labels=self.y_input)
       self.xent = tf.reduce_sum(self.y_xent, name='y_xent')
       self.mean_xent = tf.reduce_mean(self.y_xent)
       self.weight_decay_loss = self._decay()
 
+  # ------------------- ResNet building blocks -------------------
+  def _resnet_stage(self, x, out_filters, num_blocks, name, first_stride):
+    """Build a stage consisting of `num_blocks` basic blocks.
+
+    Args:
+      x: input tensor
+      out_filters: number of filters for this stage
+      num_blocks: number of basic blocks (for ResNet-18 it's 2)
+      name: scope name
+      first_stride: stride for the first block in the stage
+    """
+    with tf.variable_scope(name):
+      # first block may change dimensions via stride and possibly increasing filters
+      x = self._basic_block(x, out_filters, stride=first_stride, name='block0')
+      for i in range(1, num_blocks):
+        x = self._basic_block(x, out_filters, stride=1, name='block%d' % i)
+    return x
+
+  def _basic_block(self, x, out_filters, stride, name):
+    """Basic ResNet block (2 conv layers) for ResNet-18/34.
+
+    Implements:
+      y = F(x) + shortcut(x)
+    Where F = conv-bn-relu-conv-bn
+    """
+    in_filters = int(x.get_shape()[-1])
+    with tf.variable_scope(name):
+      with tf.variable_scope('sub1'):
+        x1 = self._batch_norm('bn1', x)
+        x1 = self._relu(x1, 0.0)
+        x1 = self._conv('conv1', x1, filter_size=3, in_filters=in_filters, out_filters=out_filters, strides=self._stride_arr(stride))
+
+      with tf.variable_scope('sub2'):
+        x1 = self._batch_norm('bn2', x1)
+        x1 = self._relu(x1, 0.0)
+        x1 = self._conv('conv2', x1, filter_size=3, in_filters=out_filters, out_filters=out_filters, strides=self._stride_arr(1))
+
+      # shortcut
+      if in_filters != out_filters or stride != 1:
+        # downsample spatially and adjust channels with 1x1 conv (following standard ResNet)
+        with tf.variable_scope('shortcut'):
+          shortcut = self._conv('conv_shortcut', x, filter_size=1, in_filters=in_filters, out_filters=out_filters, strides=self._stride_arr(stride))
+      else:
+        shortcut = x
+
+      out = x1 + shortcut
+      return out
+
+  # ------------------- layers / helpers -------------------
   def _batch_norm(self, name, x):
     """Batch normalization."""
     with tf.name_scope(name):
@@ -109,55 +131,13 @@ class Model(object):
           updates_collections=None,
           is_training=(self.mode == 'train'))
 
-  def _residual(self, x, in_filter, out_filter, stride,
-                activate_before_residual=False):
-    """Residual unit with 2 sub layers."""
-    if activate_before_residual:
-      with tf.variable_scope('shared_activation'):
-        x = self._batch_norm('init_bn', x)
-        x = self._relu(x, 0.1)
-        orig_x = x
-    else:
-      with tf.variable_scope('residual_only_activation'):
-        orig_x = x
-        x = self._batch_norm('init_bn', x)
-        x = self._relu(x, 0.1)
-
-    with tf.variable_scope('sub1'):
-      x = self._conv('conv1', x, 3, in_filter, out_filter, stride)
-
-    with tf.variable_scope('sub2'):
-      x = self._batch_norm('bn2', x)
-      x = self._relu(x, 0.1)
-      x = self._conv('conv2', x, 3, out_filter, out_filter, [1, 1, 1, 1])
-
-    with tf.variable_scope('sub_add'):
-      if in_filter != out_filter:
-        orig_x = tf.nn.avg_pool(orig_x, stride, stride, 'VALID')
-        orig_x = tf.pad(
-            orig_x, [[0, 0], [0, 0], [0, 0],
-                     [(out_filter-in_filter)//2, (out_filter-in_filter)//2]])
-      x += orig_x
-
-    tf.logging.debug('image after unit %s', x.get_shape())
-    return x
-
-  def _decay(self):
-    """L2 weight decay loss."""
-    costs = []
-    for var in tf.trainable_variables():
-      if var.op.name.find('DW') > 0:
-        costs.append(tf.nn.l2_loss(var))
-    return tf.add_n(costs)
-
   def _conv(self, name, x, filter_size, in_filters, out_filters, strides):
-    """Convolution."""
+    """Convolution with Xavier/He initialization consistent with previous code."""
     with tf.variable_scope(name):
       n = filter_size * filter_size * out_filters
       kernel = tf.get_variable(
           'DW', [filter_size, filter_size, in_filters, out_filters],
-          tf.float32, initializer=tf.random_normal_initializer(
-              stddev=np.sqrt(2.0/n)))
+          tf.float32, initializer=tf.random_normal_initializer(stddev=np.sqrt(2.0/n)))
       return tf.nn.conv2d(x, kernel, strides, padding='SAME')
 
   def _relu(self, x, leakiness=0.0):
@@ -182,5 +162,13 @@ class Model(object):
     assert x.get_shape().ndims == 4
     return tf.reduce_mean(x, [1, 2])
 
-
-
+  def _decay(self):
+    """L2 weight decay loss. Keeps same variable-name pattern as original code."""
+    costs = []
+    for var in tf.trainable_variables():
+      if var.op.name.find('DW') > 0:
+        costs.append(tf.nn.l2_loss(var))
+    if costs:
+      return tf.add_n(costs)
+    else:
+      return tf.constant(0.0)
