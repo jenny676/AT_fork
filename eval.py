@@ -20,13 +20,23 @@ import cifar10_input
 from model import Model
 from pgd_attack import LinfPGDAttack
 
+def append_metrics(out_dir, metrics):
+  fname = os.path.join(out_dir, "metrics.jsonl")
+  with open(fname, "a") as fh:
+    fh.write(json.dumps(metrics) + "\n")
+
 # Global constants
 with open('config.json') as config_file:
   config = json.load(config_file)
+
 num_eval_examples = config['num_eval_examples']
-eval_batch_size = config['eval_batch_size']
-eval_on_cpu = config['eval_on_cpu']
+eval_batch_size = config.get('eval_batch_size', 100)
+eval_on_cpu = config.get('eval_on_cpu', False)
 data_path = config['data_path']
+
+# evaluation-specific PGD settings (paper/protocol)
+EVAL_NUM_STEPS = config.get('eval_num_steps', 20)    # PGD-20 for eval
+EVAL_RESTARTS = config.get('eval_restarts', 5)       # number of random restarts
 
 model_dir = config['model_dir']
 
@@ -37,19 +47,19 @@ if eval_on_cpu:
   with tf.device("/cpu:0"):
     model = Model(mode='eval')
     attack = LinfPGDAttack(model,
-                           config['epsilon'],
-                           config['num_steps'],
-                           config['step_size'],
-                           config['random_start'],
-                           config['loss_func'])
+                       config['epsilon'],
+                       EVAL_NUM_STEPS,        # use eval steps here
+                       config['step_size'],
+                       config['random_start'],
+                       config['loss_func'])
 else:
   model = Model(mode='eval')
   attack = LinfPGDAttack(model,
-                         config['epsilon'],
-                         config['num_steps'],
-                         config['step_size'],
-                         config['random_start'],
-                         config['loss_func'])
+                       config['epsilon'],
+                       EVAL_NUM_STEPS,        # use eval steps here
+                       config['step_size'],
+                       config['random_start'],
+                       config['loss_func'])
 
 global_step = tf.contrib.framework.get_or_create_global_step()
 
@@ -89,7 +99,7 @@ def evaluate_checkpoint(filename):
       dict_nat = {model.x_input: x_batch,
                   model.y_input: y_batch}
 
-      x_batch_adv = attack.perturb(x_batch, y_batch, sess)
+      x_batch_adv = attack.perturb(x_batch, y_batch, sess, restarts=EVAL_RESTARTS)
 
       dict_adv = {model.x_input: x_batch_adv,
                   model.y_input: y_batch}
@@ -101,7 +111,6 @@ def evaluate_checkpoint(filename):
                                       [model.num_correct,model.xent],
                                       feed_dict = dict_adv)
 
-      print(eval_batch_size)
       print("Correctly classified natural examples: {}".format(cur_corr_nat))
       print("Correctly classified adversarial examples: {}".format(cur_corr_adv))
       total_xent_nat += cur_xent_nat
@@ -127,6 +136,19 @@ def evaluate_checkpoint(filename):
     print('adversarial: {:.2f}%'.format(100 * acc_adv))
     print('avg nat loss: {:.4f}'.format(avg_xent_nat))
     print('avg adv loss: {:.4f}'.format(avg_xent_adv))
+    # save metrics to metrics.jsonl
+    metrics = {
+      "checkpoint": os.path.basename(filename),
+      "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+      "num_eval_examples": int(num_eval_examples),
+      "eval_batch_size": int(eval_batch_size),
+      "eval_num_steps": int(EVAL_NUM_STEPS),
+      "eval_restarts": int(EVAL_RESTARTS),
+      "clean_acc": float(acc_nat),
+      "robust_pgd{}_acc".format(EVAL_NUM_STEPS): float(acc_adv)
+    }
+    append_metrics(model_dir, metrics)
+
 
 # Infinite eval loop
 while True:
