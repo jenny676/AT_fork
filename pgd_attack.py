@@ -14,13 +14,10 @@ import cifar10_input
 
 class LinfPGDAttack:
   def __init__(self, model, epsilon, num_steps, step_size, random_start, loss_func):
-    """Attack parameter initialization. The attack performs k steps of
-       size a, while always staying within epsilon from the initial
-       point."""
     self.model = model
-    self.epsilon = epsilon
+    self.epsilon = epsilon         # expected in [0,1] (e.g., 8/255)
     self.num_steps = num_steps
-    self.step_size = step_size
+    self.step_size = step_size     # expected in [0,1] (e.g., 2/255)
     self.rand = random_start
 
     if loss_func == 'xent':
@@ -38,27 +35,82 @@ class LinfPGDAttack:
       print('Unknown loss function. Defaulting to cross-entropy')
       loss = model.xent
 
+    # gradient of loss wrt inputs (TF tensor). Will be evaluated in sess.run
     self.grad = tf.gradients(loss, model.x_input)[0]
 
-  def perturb(self, x_nat, y, sess):
-    """Given a set of examples (x_nat, y), returns a set of adversarial
-       examples within epsilon of x_nat in l_infinity norm."""
-    if self.rand:
-      x = x_nat + np.random.uniform(-self.epsilon, self.epsilon, x_nat.shape)
-      x = np.clip(x, 0, 255) # ensure valid pixel range
+
+  def perturb(self, x_nat, y, sess, restarts=1):
+    """
+    x_nat: numpy array of shape [B, H, W, C], dtype can be uint8 or float32
+    y: numpy array of labels
+    restarts: number of random restarts (default 1). This returns the adversarial
+              example per input that leads to misclassification if any restart succeeds.
+    Returns: x_adv_best (same shape as x_nat, dtype float32)
+    """
+
+    # Convert to float32 and detect scale (0..1 vs 0..255)
+    x_nat = x_nat.astype(np.float32)
+    maxv = x_nat.max()
+    if maxv > 1.0:
+      # input is in 0..255 range, convert to 0..1
+      scale = 255.0
     else:
-      x = x_nat.astype(np.float)
+      scale = 1.0
 
-    for i in range(self.num_steps):
-      grad = sess.run(self.grad, feed_dict={self.model.x_input: x,
-                                            self.model.y_input: y})
+    # convert epsilon / step_size from [0,1] units to actual pixel units in the input array
+    eps_pixels = float(self.epsilon) * scale
+    step_pixels = float(self.step_size) * scale
 
-      x = np.add(x, self.step_size * np.sign(grad), out=x, casting='unsafe')
+    B = x_nat.shape[0]
+    x_nat_clipped = np.clip(x_nat, 0.0, scale)
 
-      x = np.clip(x, x_nat - self.epsilon, x_nat + self.epsilon)
-      x = np.clip(x, 0, 255) # ensure valid pixel range
+    # keep track of best adversarial examples found (initially natural)
+    x_best = x_nat_clipped.copy()
+    # keep track of whether an example is currently misclassified (we want one that misclassifies if possible)
+    # We'll use model.predictions to check — but to avoid extra sessions, we will track logits during restarts below.
+    found_adv = np.zeros(B, dtype=np.bool)
 
-    return x
+    for r in range(restarts):
+      # random init inside epsilon-ball
+      if self.rand:
+        x = x_nat_clipped + np.random.uniform(-eps_pixels, eps_pixels, x_nat.shape).astype(np.float32)
+        x = np.clip(x, 0.0, scale)
+      else:
+        x = x_nat_clipped.copy()
+
+      # iterative PGD steps
+      for i in range(self.num_steps):
+        # ensure float32 and feed into TF
+        feed = {self.model.x_input: x, self.model.y_input: y}
+        grad = sess.run(self.grad, feed_dict=feed)  # shape [B,H,W,C] float32
+
+        # gradient step: x = x + step_pixels * sign(grad)
+        x = x + step_pixels * np.sign(grad).astype(np.float32)
+
+        # project into linf ball around x_nat and valid pixel range
+        x = np.minimum(np.maximum(x, x_nat_clipped - eps_pixels), x_nat_clipped + eps_pixels)
+        x = np.clip(x, 0.0, scale)
+
+      # after this restart, check predictions on x to see which are successful
+      # get model predictions (argmax)
+      try:
+        preds = sess.run(self.model.predictions, feed_dict={self.model.x_input: x})
+      except AttributeError:
+        # fallback to pre_softmax argmax if predictions isn't available
+        preds = sess.run(tf.argmax(self.model.pre_softmax, 1), feed_dict={self.model.x_input: x})
+
+      # update x_best for those that are now adversarial (pred != y)
+      is_adv = (preds != y)
+      # replace x_best where we found adv this restart
+      x_best[is_adv & (~found_adv)] = x[is_adv & (~found_adv)]
+      # mark as found (we want any restart that succeeds)
+      found_adv = found_adv | is_adv
+
+      # Optional: for examples already found adversarial, you might want to keep the one producing highest loss.
+      # Implementing "choose worst over restarts" by loss would require computing loss outputs and comparing per-example; keep simple: first found wins.
+
+    return x_best
+
 
 
 if __name__ == '__main__':
@@ -119,3 +171,4 @@ if __name__ == '__main__':
     x_adv = np.concatenate(x_adv, axis=0)
     np.save(path, x_adv)
     print('Examples stored in {}'.format(path))
+
