@@ -16,6 +16,9 @@
   "step_size_schedule": [[0, 0.1], [40000, 0.01], [60000, 0.001]],
   "weight_decay": 0.0002,
   "momentum": 0.9,
+  
+  "train_frac": 1.0,
+  "train_frac_seed": 0
 
   "_comment": "===== EVAL CONFIGURATION =====",
   "num_eval_examples": 10000,
