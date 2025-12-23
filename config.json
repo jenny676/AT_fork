@@ -1,6 +1,6 @@
 {
   "_comment": "SMOKE TEST: tiny quick run on CPU",
-  "model_dir": "/tmp/smoke_smoke_test",
+  "model_dir": "/content/drive/MyDrive/AT_smoke",
   "data_path": "cifar10_data",
 
   "tf_random_seed": 1,
