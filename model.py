@@ -22,7 +22,6 @@ class Model(tf.keras.Model):
         self.init_conv = layers.Conv2D(
             64, 3, strides=1, padding='same',
             use_bias=False,
-            kernel_initializer=tf.random_normal_initializer(stddev=0.0),
             kernel_regularizer=regularizers.l2(self.wd),
             name='init_conv'
         )
@@ -122,7 +121,6 @@ class Model(tf.keras.Model):
         for stage_blocks in self.stage_layers:
             for block in stage_blocks:
                 shortcut = x
-                # pre-activation style follows original: bn -> relu -> conv
                 # sub1
                 x1 = block['bn1'](x, training=training)
                 x1 = tf.nn.relu(x1)
