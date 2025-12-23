@@ -1,174 +1,151 @@
-"""
-Implementation of attack methods. Running this file as a program will
-apply the attack to the model specified by the config file and store
-the examples in an .npy file.
-"""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-import tensorflow as tf
+# pgd_attack.py -- TF2 version of LinfPGDAttack
 import numpy as np
-
-import cifar10_input
+import tensorflow as tf
 
 class LinfPGDAttack:
-  def __init__(self, model, epsilon, num_steps, step_size, random_start, loss_func):
-    self.model = model
-    self.epsilon = epsilon         # expected in [0,1] (e.g., 8/255)
-    self.num_steps = num_steps
-    self.step_size = step_size     # expected in [0,1] (e.g., 2/255)
-    self.rand = random_start
+    def __init__(self, model, epsilon, num_steps, step_size, random_start, loss_func='xent'):
+        """
+        TF2 Linf PGD attack.
 
-    if loss_func == 'xent':
-      loss = model.xent
-    elif loss_func == 'cw':
-      label_mask = tf.one_hot(model.y_input,
-                              10,
-                              on_value=1.0,
-                              off_value=0.0,
-                              dtype=tf.float32)
-      correct_logit = tf.reduce_sum(label_mask * model.pre_softmax, axis=1)
-      wrong_logit = tf.reduce_max((1-label_mask) * model.pre_softmax - 1e4*label_mask, axis=1)
-      loss = -tf.nn.relu(correct_logit - wrong_logit + 50)
-    else:
-      print('Unknown loss function. Defaulting to cross-entropy')
-      loss = model.xent
+        Args:
+          model: a tf.keras.Model or callable that takes (x, training=False) and returns logits.
+          epsilon: float in [0,1] (e.g., 8/255).
+          num_steps: number of PGD steps.
+          step_size: step size in [0,1] (e.g., 2/255).
+          random_start: bool, whether to initialize with random noise inside the linf ball.
+          loss_func: 'xent' or 'cw' (untargeted). 'xent' maximizes cross-entropy; 'cw' uses margin loss.
+        """
+        self.model = model
+        self.epsilon = float(epsilon)
+        self.num_steps = int(num_steps)
+        self.step_size = float(step_size)
+        self.random_start = bool(random_start)
+        assert loss_func in ('xent', 'cw'), "loss_func must be 'xent' or 'cw'"
+        self.loss_func = loss_func
 
-    # gradient of loss wrt inputs (TF tensor). Will be evaluated in sess.run
-    self.grad = tf.gradients(loss, model.x_input)[0]
+    def _compute_loss(self, logits, labels):
+        """
+        Compute per-example loss to maximize (higher = more likely to be adversarial).
+        For untargeted attack we maximize loss.
+        """
+        # logits: [B, num_classes], labels: [B]
+        if self.loss_func == 'xent':
+            # per-example cross-entropy (not reduced)
+            per_ex = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits)
+            # we maximize cross-entropy, so return per_ex
+            return per_ex
+        else:  # cw
+            # construct one-hot
+            num_classes = tf.shape(logits)[1]
+            one_hot = tf.one_hot(labels, num_classes, dtype=logits.dtype)
+            correct_logit = tf.reduce_sum(one_hot * logits, axis=1)
+            # max over other logits
+            INF = 1e4
+            wrong_logits = logits - one_hot * INF
+            max_wrong = tf.reduce_max(wrong_logits, axis=1)
+            # CW loss: maximize (correct - wrong + kappa) negative; we want high value when misclassified
+            # Use margin = correct - max_wrong; maximize -(margin) => minimize margin, so return -relu(...)
+            margin = correct_logit - max_wrong
+            # We'll use negative margin as "loss to maximize" with some margin constant; adjust if needed
+            return -tf.nn.relu(margin + 50.0)  # kept +50 like original scale (can be tuned)
 
+    @tf.function
+    def _pgd_single(self, x_nat, y, eps, step, num_steps, rand_init):
+        """
+        Run PGD starting from an initial x (x_nat or randomly perturbed).
+        This function expects tensors and returns the final adversarial tensor and per-example loss.
+        All tensors are float32 and in the same scale as x_nat provided (i.e., if x_nat in 0..255 use that).
+        """
+        # x_nat, y: tensors
+        # eps, step: scalars (same units as x_nat)
+        # rand_init: bool
+        # initialize delta
+        if rand_init:
+            delta = tf.random.uniform(tf.shape(x_nat), -eps, eps, dtype=x_nat.dtype)
+        else:
+            delta = tf.zeros_like(x_nat)
 
-  def perturb(self, x_nat, y, sess, restarts=1):
-    """
-    x_nat: numpy array of shape [B, H, W, C], dtype can be uint8 or float32
-    y: numpy array of labels
-    restarts: number of random restarts (default 1). This returns the adversarial
-              example per input that leads to misclassification if any restart succeeds.
-    Returns: x_adv_best (same shape as x_nat, dtype float32)
-    """
+        # make sure within valid pixel range
+        x_adv = tf.clip_by_value(x_nat + delta, 0.0, tf.reduce_max(x_nat) if tf.reduce_max(x_nat) > 1.0 else 1.0)
+        delta = x_adv - x_nat
 
-    # Convert to float32 and detect scale (0..1 vs 0..255)
-    x_nat = x_nat.astype(np.float32)
-    maxv = x_nat.max()
-    if maxv > 1.0:
-      # input is in 0..255 range, convert to 0..1
-      scale = 255.0
-    else:
-      scale = 1.0
+        # iterative update
+        for _ in tf.range(num_steps):
+            with tf.GradientTape() as tape:
+                tape.watch(delta)
+                cur = x_nat + delta
+                logits = self.model(cur, training=False)
+                per_ex_loss = self._compute_loss(logits, y)  # shape [B]
+                loss = tf.reduce_mean(per_ex_loss)  # scalar just for gradient
+            # grad w.r.t. delta
+            grad = tape.gradient(loss, delta)
+            # step: sign gradient ascent (we maximize loss)
+            signed_grad = tf.sign(grad)
+            delta = delta + step * signed_grad
+            # project to linf ball and valid pixel range
+            delta = tf.clip_by_value(delta, -eps, eps)
+            x_adv = tf.clip_by_value(x_nat + delta, 0.0, tf.reduce_max(x_nat) if tf.reduce_max(x_nat) > 1.0 else 1.0)
+            delta = x_adv - x_nat
+        # compute final logits and per-example loss
+        final_logits = self.model(x_nat + delta, training=False)
+        final_per_ex_loss = self._compute_loss(final_logits, y)
+        # return adversarial examples and per-example loss
+        return x_nat + delta, final_per_ex_loss
 
-    # convert epsilon / step_size from [0,1] units to actual pixel units in the input array
-    eps_pixels = float(self.epsilon) * scale
-    step_pixels = float(self.step_size) * scale
+    def perturb(self, x_nat, y, restarts=1):
+        """
+        Produce adversarial examples for x_nat, y.
 
-    B = x_nat.shape[0]
-    x_nat_clipped = np.clip(x_nat, 0.0, scale)
+        Args:
+          x_nat: numpy array or tf.Tensor, shape [B,H,W,C]. dtype uint8 or float32.
+                 Values may be in 0..1 or 0..255. Returns will be in same scale as x_nat input but dtype float32.
+          y: numpy array or tf.Tensor, shape [B] integer labels.
+          restarts: number of random restarts. We'll keep the best (largest loss) adversarial per example.
 
-    # keep track of best adversarial examples found (initially natural)
-    x_best = x_nat_clipped.copy()
-    # keep track of whether an example is currently misclassified (we want one that misclassifies if possible)
-    # We'll use model.predictions to check — but to avoid extra sessions, we will track logits during restarts below.
-    found_adv = np.zeros(B, dtype=np.bool)
+        Returns:
+          x_best: numpy array float32 shape [B,H,W,C]
+        """
+        # convert inputs to tensors
+        x_np = x_nat
+        y_np = y
+        # Detect scale and convert input to float32
+        x = tf.convert_to_tensor(x_np)
+        if x.dtype != tf.float32:
+            x = tf.cast(x, tf.float32)
+        # Determine scale: if any pixel > 1, assume 0..255
+        maxv = tf.reduce_max(x)
+        scale = tf.cond(maxv > 1.0, lambda: tf.constant(255.0, dtype=tf.float32), lambda: tf.constant(1.0, dtype=tf.float32))
 
-    for r in range(restarts):
-      # random init inside epsilon-ball
-      if self.rand:
-        x = x_nat_clipped + np.random.uniform(-eps_pixels, eps_pixels, x_nat.shape).astype(np.float32)
-        x = np.clip(x, 0.0, scale)
-      else:
-        x = x_nat_clipped.copy()
+        # convert eps and step to pixel units consistent with x's scale
+        eps_pixels = tf.cast(self.epsilon, tf.float32) * scale
+        step_pixels = tf.cast(self.step_size, tf.float32) * scale
 
-      # iterative PGD steps
-      for i in range(self.num_steps):
-        # ensure float32 and feed into TF
-        feed = {self.model.x_input: x, self.model.y_input: y}
-        grad = sess.run(self.grad, feed_dict=feed)  # shape [B,H,W,C] float32
+        y_t = tf.convert_to_tensor(y_np, dtype=tf.int32)
 
-        # gradient step: x = x + step_pixels * sign(grad)
-        x = x + step_pixels * np.sign(grad).astype(np.float32)
+        # We'll run `restarts` independent PGD runs and pick the per-example adversarial with maximum per-example loss.
+        # Prepare accumulators on host (numpy) to keep best adv and best loss
+        x_best = x.numpy().astype(np.float32).copy()  # start with natural as fallback
+        # initialize best_losses to -inf so that any real loss will be larger
+        best_losses = np.full((x.shape[0],), -np.inf, dtype=np.float32)
 
-        # project into linf ball around x_nat and valid pixel range
-        x = np.minimum(np.maximum(x, x_nat_clipped - eps_pixels), x_nat_clipped + eps_pixels)
-        x = np.clip(x, 0.0, scale)
+        # For each restart, run PGD and evaluate per-example loss; keep best per-example by loss
+        for r in range(restarts):
+            # choose random init flag for this restart (use the configured random_start)
+            rand_init = self.random_start
 
-      # after this restart, check predictions on x to see which are successful
-      # get model predictions (argmax)
-      try:
-        preds = sess.run(self.model.predictions, feed_dict={self.model.x_input: x})
-      except AttributeError:
-        # fallback to pre_softmax argmax if predictions isn't available
-        preds = sess.run(tf.argmax(self.model.pre_softmax, 1), feed_dict={self.model.x_input: x})
+            # run pgd single (this is compiled tf.function)
+            x_adv_tensor, per_ex_loss = self._pgd_single(x, y_t, eps_pixels, step_pixels, self.num_steps, rand_init)
 
-      # update x_best for those that are now adversarial (pred != y)
-      is_adv = (preds != y)
-      # replace x_best where we found adv this restart
-      x_best[is_adv & (~found_adv)] = x[is_adv & (~found_adv)]
-      # mark as found (we want any restart that succeeds)
-      found_adv = found_adv | is_adv
+            # convert to numpy
+            x_adv_np = x_adv_tensor.numpy().astype(np.float32)
+            loss_np = per_ex_loss.numpy().astype(np.float32)
 
-      # Optional: for examples already found adversarial, you might want to keep the one producing highest loss.
-      # Implementing "choose worst over restarts" by loss would require computing loss outputs and comparing per-example; keep simple: first found wins.
+            # Update per-example bests where this restart produced higher loss
+            mask = loss_np > best_losses
+            if np.any(mask):
+                x_best[mask] = x_adv_np[mask]
+                best_losses[mask] = loss_np[mask]
 
-    return x_best
-
-
-
-if __name__ == '__main__':
-  import json
-  import sys
-  import math
-
-
-  from model import Model
-
-  with open('config.json') as config_file:
-    config = json.load(config_file)
-
-  model_file = tf.train.latest_checkpoint(config['model_dir'])
-  if model_file is None:
-    print('No model found')
-    sys.exit()
-
-  model = Model(mode='eval')
-  attack = LinfPGDAttack(model,
-                         config['epsilon'],
-                         config['num_steps'],
-                         config['step_size'],
-                         config['random_start'],
-                         config['loss_func'])
-  saver = tf.train.Saver()
-
-  data_path = config['data_path']
-  cifar = cifar10_input.CIFAR10Data(data_path)
-
-  with tf.Session() as sess:
-    # Restore the checkpoint
-    saver.restore(sess, model_file)
-
-    # Iterate over the samples batch-by-batch
-    num_eval_examples = config['num_eval_examples']
-    eval_batch_size = config['eval_batch_size']
-    num_batches = int(math.ceil(num_eval_examples / eval_batch_size))
-
-    x_adv = [] # adv accumulator
-
-    print('Iterating over {} batches'.format(num_batches))
-
-    for ibatch in range(num_batches):
-      bstart = ibatch * eval_batch_size
-      bend = min(bstart + eval_batch_size, num_eval_examples)
-      print('batch size: {}'.format(bend - bstart))
-
-      x_batch = cifar.eval_data.xs[bstart:bend, :]
-      y_batch = cifar.eval_data.ys[bstart:bend]
-
-      x_batch_adv = attack.perturb(x_batch, y_batch, sess)
-
-      x_adv.append(x_batch_adv)
-
-    print('Storing examples')
-    path = config['store_adv_path']
-    x_adv = np.concatenate(x_adv, axis=0)
-    np.save(path, x_adv)
-    print('Examples stored in {}'.format(path))
-
+        # final clipping to valid range (preserve scale)
+        x_best = np.clip(x_best, 0.0, (255.0 if np.max(x_best) > 1.0 else 1.0)).astype(np.float32)
+        return x_best
