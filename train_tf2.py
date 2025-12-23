@@ -238,6 +238,12 @@ epoch_train_time = 0.0
 step = start_step
 start_time_total = time.time()
 
+# -------------------------
+# Epoch bookkeeping
+# -------------------------
+steps_per_epoch = int(cifar.train_data.num_examples // batch_size)
+if steps_per_epoch <= 0:
+    raise ValueError("batch_size is larger than training set size")
 
 print("Starting training from step", step)
 while step < max_num_training_steps:
