@@ -181,10 +181,10 @@ with tf.Session() as sess:
 
    if train_frac < 1.0:
       try:
-      xs = cifar.train_data.xs
-      ys = cifar.train_data.ys
+         xs = cifar.train_data.xs
+         ys = cifar.train_data.ys
       except AttributeError:
-      raise RuntimeError("cifar.train_data does not expose .xs/.ys; adapt subsample code to your data loader.")
+         raise RuntimeError("cifar.train_data does not expose .xs/.ys; adapt subsample code to your data loader.")
 
    num_total = xs.shape[0]
    num_keep = int(np.floor(num_total * train_frac))
