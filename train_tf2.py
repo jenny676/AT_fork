@@ -82,7 +82,17 @@ else:
     boundaries = [int(sss[0]) for sss in step_size_schedule][1:]
     values = [sss[1] for sss in step_size_schedule]
 
-lr_schedule = tf.keras.optimizers.schedules.PiecewiseConstantDecay(boundaries, values)
+# ---- learning rate setup (robust to 1-entry schedules)
+if not step_size_schedule:
+    lr_schedule = 0.001
+elif len(step_size_schedule) == 1:
+    lr_schedule = float(step_size_schedule[0][1])
+else:
+    boundaries = [int(s[0]) for s in step_size_schedule][1:]
+    values = [float(s[1]) for s in step_size_schedule]
+    lr_schedule = tf.keras.optimizers.schedules.PiecewiseConstantDecay(
+        boundaries, values
+    )
 optimizer = tf.keras.optimizers.SGD(learning_rate=lr_schedule, momentum=momentum)
 
 model = Model(mode='train', num_classes=10, weight_decay=weight_decay)
