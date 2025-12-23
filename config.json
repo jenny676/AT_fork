@@ -1,36 +1,29 @@
 {
-  "_comment": "SMOKE TEST: tiny quick run on CPU",
-  "model_dir": "/content/drive/MyDrive/AT_smoke",
+  "_comment": "AT JSON adjusted so numeric values match PART run (batch-size 128, train-percent 10.0, 50 epochs, save-freq 20). Keys unchanged.",
+  "model_dir": "/content/drive/MyDrive/AT_10%",
   "data_path": "cifar10_data",
-
   "tf_random_seed": 1,
   "np_random_seed": 1,
-
   "training_batch_size": 128,
-  "train_frac": 0.01,
+  "train_frac": 0.10,
   "train_frac_seed": 1,
-
-  "max_num_training_steps": 4,
+  "max_num_training_steps": 2000,
   "num_output_steps": 1,
   "num_summary_steps": 1,
-  "num_checkpoint_steps": 1,
+  "num_checkpoint_steps": 800,
   "num_checkpoint_steps_for_epoch_logging": 1,
-
   "step_size_schedule": [[0, 0.01]],
   "weight_decay": 0.0002,
   "momentum": 0.9,
-
   "epsilon": 0.03137254901960784,
-  "num_steps": 2,
+  "num_steps": 10,
   "step_size": 0.00784313725490196,
-  "eval_num_steps": 2,
+  "eval_num_steps": 10,
   "eval_restarts": 1,
   "random_start": true,
   "loss_func": "xent",
-
   "num_eval_examples": 100,
   "eval_batch_size": 25,
   "eval_on_cpu": true,
-
   "store_adv_path": "attack_smoke.npy"
 }
