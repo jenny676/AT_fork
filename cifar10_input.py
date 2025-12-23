@@ -135,4 +135,5 @@ class AugmentedCIFAR10Data:
         ds = tf.data.Dataset.from_tensor_slices((xs, ys))
         ds = ds.map(self._preprocess_for_eval, num_parallel_calls=tf.data.AUTOTUNE)
         ds = ds.batch(batch_size)
-        ds = ds.
+        ds = ds.prefetch(tf.data.AUTOTUNE)
+        return ds
