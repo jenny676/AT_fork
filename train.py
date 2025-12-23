@@ -206,15 +206,28 @@ with tf.Session() as sess:
 
   # Initialize the summary writer, global variables, and our time counter.
   summary_writer = tf.summary.FileWriter(model_dir, sess.graph)
-  # ensure metrics CSV has header
-  init_metrics_csv()
-  sess.run(tf.global_variables_initializer())
-  training_time = 0.0
-
-  # Main training loop
-  for ii in range(max_num_training_steps):
-    x_batch, y_batch = cifar.train_data.get_next_batch(batch_size,
-                                                       multiple_passes=True)
+   # ensure metrics CSV has header
+   init_metrics_csv()
+   
+   sess.run(tf.global_variables_initializer())
+   
+   # ---- RESUME FROM CHECKPOINT IF EXISTS ----
+   ckpt = tf.train.latest_checkpoint(model_dir)
+   if ckpt is not None:
+       print("Restoring from checkpoint:", ckpt)
+       saver.restore(sess, ckpt)
+       start_step = sess.run(global_step)
+   else:
+       print("No checkpoint found. Training from scratch.")
+       start_step = 0
+   
+   training_time = 0.0
+   
+   # Main training loop
+   for ii in range(start_step, max_num_training_steps):
+       x_batch, y_batch = cifar.train_data.get_next_batch(
+           batch_size, multiple_passes=True
+       )
 
     # Compute Adversarial Perturbations (training PGD, e.g. PGD-10)
     start = timer()
