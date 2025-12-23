@@ -103,8 +103,20 @@ ckpt = tf.train.Checkpoint(step=tf.Variable(0, dtype=tf.int64),
                            model=model)
 ckpt_manager = tf.train.CheckpointManager(ckpt, model_dir, max_to_keep=3)
 if ckpt_manager.latest_checkpoint:
-    ckpt.restore(ckpt_manager.latest_checkpoint)
+    # 1) Build model variables (if not already built)
+    dummy_x = tf.zeros([1, 32, 32, 3], dtype=tf.float32)
+    _ = model(dummy_x, training=False)
+
+    # 2) Create optimizer slot variables (momentum, etc.)
+    zero_grads = [tf.zeros_like(v) for v in model.trainable_variables]
+    optimizer.apply_gradients(zip(zero_grads, model.trainable_variables))
+
+    # 3) Now restore — optimizer slots exist, so TF can map them
+    status = ckpt.restore(ckpt_manager.latest_checkpoint)
+    status.expect_partial()  # optional but safe
     print("Restored from", ckpt_manager.latest_checkpoint)
+else:
+    print("No checkpoint found, starting from scratch")
 start_step = int(ckpt.step.numpy())
 
 # ---- attack (training + eval)
