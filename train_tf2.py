@@ -264,8 +264,8 @@ while step < max_num_training_steps:
     # increment loop continues until max_num_training_steps
     # reset metrics regularly (you can choose when to reset)
     if step % num_summary_steps == 0:
-        train_loss_metric.reset_states()
-        train_acc_metric.reset_states()
+        train_loss_metric.reset_state()
+        train_acc_metric.reset_state()
 
 # ---- evaluation at end (or you can schedule periodic evals)
 print("Running evaluation ...")
