@@ -1,38 +1,36 @@
 {
-  "_comment": "===== MODEL CONFIGURATION =====",
-  "model_dir": "models/a_very_robust_model",
-
-  "_comment": "===== DATASET CONFIGURATION =====",
+  "_comment": "SMOKE TEST: tiny quick run on CPU",
+  "model_dir": "/tmp/smoke_smoke_test",
   "data_path": "cifar10_data",
 
-  "_comment": "===== TRAINING CONFIGURATION =====",
-  "tf_random_seed": 451760341,
-  "np_random_seed": 216105420,
-  "max_num_training_steps": 80000,
-  "num_output_steps": 100,
-  "num_summary_steps": 100,
-  "num_checkpoint_steps": 1000,
+  "tf_random_seed": 1,
+  "np_random_seed": 1,
+
   "training_batch_size": 128,
-  "step_size_schedule": [[0, 0.1], [40000, 0.01], [60000, 0.001]],
+  "train_frac": 0.01,
+  "train_frac_seed": 1,
+
+  "max_num_training_steps": 4,
+  "num_output_steps": 1,
+  "num_summary_steps": 1,
+  "num_checkpoint_steps": 1,
+  "num_checkpoint_steps_for_epoch_logging": 1,
+
+  "step_size_schedule": [[0, 0.01]],
   "weight_decay": 0.0002,
   "momentum": 0.9,
-  
-  "train_frac": 1.0,
-  "train_frac_seed": 0
 
-  "_comment": "===== EVAL CONFIGURATION =====",
-  "num_eval_examples": 10000,
-  "eval_batch_size": 100,
-  "eval_on_cpu": false,
-
-  "_comment": "=====ADVERSARIAL EXAMPLES CONFIGURATION=====",
-  "epsilon": 0.03137254901960784,   // 8/255
-  "num_steps": 10,
-  "step_size": 0.00784313725490196, // 2/255
-  "eval_num_steps": 20,
-  "eval_restarts": 5,
-  "eval_batch_size": 100
+  "epsilon": 0.03137254901960784,
+  "num_steps": 2,
+  "step_size": 0.00784313725490196,
+  "eval_num_steps": 2,
+  "eval_restarts": 1,
   "random_start": true,
   "loss_func": "xent",
-  "store_adv_path": "attack.npy"
+
+  "num_eval_examples": 100,
+  "eval_batch_size": 25,
+  "eval_on_cpu": true,
+
+  "store_adv_path": "attack_smoke.npy"
 }
