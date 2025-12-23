@@ -233,9 +233,11 @@ def compute_dataset_metrics(dataset, attack_obj, batch_size, restarts):
     )
 
 # ---- training loop
-training_time = 0.0
+# epoch-local training timer (reset each epoch)
+epoch_train_time = 0.0
 step = start_step
 start_time_total = time.time()
+
 
 print("Starting training from step", step)
 while step < max_num_training_steps:
@@ -246,38 +248,100 @@ while step < max_num_training_steps:
     if not isinstance(x_batch_adv, tf.Tensor):
         x_batch_adv = tf.convert_to_tensor(x_batch_adv, dtype=tf.float32)
 
-    # logging / time
+    # per-step timing (accumulate into epoch_train_time)
     t0 = timer()
     # run train_step (tf.function)
     train_step(x_batch_adv, y_batch)
-    training_time += timer() - t0
+    step_duration = timer() - t0
+    epoch_train_time += step_duration
 
     step = step + 1
     ckpt.step.assign(step)
 
-    # output to console
+    # output to console (keeps your existing output cadence)
     if step % num_output_steps == 0:
         print(f"Step {step}: {datetime.now()}")
-        print(f"  train loss: {train_loss_metric.result().numpy():.6f}")
-        print(f"  train acc: {train_acc_metric.result().numpy():.4%}")
+        print(f"  train loss (streaming): {train_loss_metric.result().numpy():.6f}")
+        print(f"  train acc (streaming): {train_acc_metric.result().numpy():.4%}")
 
-    # summaries
+    # summaries (keep as-is)
     if step % num_summary_steps == 0:
         with summary_writer.as_default():
             tf.summary.scalar('train_loss', train_loss_metric.result(), step=step)
             tf.summary.scalar('train_acc', train_acc_metric.result(), step=step)
             summary_writer.flush()
 
-    # checkpointing
+    # checkpointing (keep as-is)
     if step % num_checkpoint_steps == 0:
         saved = ckpt_manager.save()
         print("Saved checkpoint:", saved)
 
-    # increment loop continues until max_num_training_steps
-    # reset metrics regularly (you can choose when to reset)
-    if step % num_summary_steps == 0:
+    # ----- EPOCH boundary: when we have completed steps_per_epoch training steps -----
+    if step % steps_per_epoch == 0:
+        epoch = step // steps_per_epoch
+        print(f"=== End of epoch {epoch} (step {step}). Running epoch-level evaluations ===")
+
+        # 1) Compute train metrics (clean + robust) using training attack
+        train_clean_loss, train_clean_acc, train_robust_loss, train_robust_acc, train_eval_time = compute_dataset_metrics(
+            train_eval_ds, attack, batch_size=EVAL_BATCH_SIZE, restarts=1
+        )
+
+        # 2) Compute test metrics (clean + robust)
+        num_eval_examples = int(config.get('num_eval_examples', 1000))
+        eval_ds_full = cifar.eval_dataset(batch_size=eval_batch_size)
+        eval_ds_limited = eval_ds_full.take(int(math.ceil(num_eval_examples / eval_batch_size)))
+
+        test_clean_loss, test_clean_acc, test_robust_loss, test_robust_acc, test_eval_time = compute_dataset_metrics(
+            eval_ds_limited, eval_attack, batch_size=eval_batch_size, restarts=EVAL_RESTARTS
+        )
+
+        # current lr
+        lr_val = float(lr_schedule(step)) if hasattr(lr_schedule, '__call__') else float(values[-1])
+
+        # Build metrics dict & append CSV/JSONL — use epoch_train_time (per-epoch)
+        metrics = {
+            "epoch": int(epoch),
+            "train_time": float(epoch_train_time),
+            "test_time": float(test_eval_time),
+            "lr": lr_val,
+            "train_loss": float(train_clean_loss),
+            "train_acc": float(train_clean_acc),
+            "train_robust_loss": float(train_robust_loss),
+            "train_robust_acc": float(train_robust_acc),
+            "test_loss": float(test_clean_loss),
+            "test_acc": float(test_clean_acc),
+            "test_robust_loss": float(test_robust_loss),
+            "test_robust_acc": float(test_robust_acc)
+        }
+
+        append_metrics_json_line(metrics)
+        append_metrics_csv([
+            metrics["epoch"],
+            metrics["train_time"],
+            metrics["test_time"],
+            metrics["lr"],
+            metrics["train_loss"],
+            metrics["train_acc"],
+            metrics["train_robust_loss"],
+            metrics["train_robust_acc"],
+            metrics["test_loss"],
+            metrics["test_acc"],
+            metrics["test_robust_loss"],
+            metrics["test_robust_acc"]
+        ])
+
+        # optional: print epoch summary
+        print(f"Epoch {epoch} summary: lr={lr_val:.6g} train_loss={train_clean_loss:.4f} train_acc={train_clean_acc:.4%} "
+              f"train_robust_acc={train_robust_acc:.4%} test_robust_acc={test_robust_acc:.4%}")
+
+        # Reset streaming metrics
         train_loss_metric.reset_state()
         train_acc_metric.reset_state()
+
+        # Reset epoch-local timer for next epoch
+        epoch_train_time = 0.0
+
+    # loop continues until max_num_training_steps
 
 # ---- evaluation at end (or you can schedule periodic evals)
 print("Running evaluation ...")
@@ -301,7 +365,7 @@ print(f"  eval time: {eval_time:.1f}s")
 # log metrics
 metrics = {
     "epoch": None,
-    "train_time": training_time,
+    "train_time": epoch_train_time,  # last epoch duration
     "test_time": eval_time,
     "lr": float(lr_schedule(step)) if hasattr(lr_schedule, '__call__') else float(values[-1]),
     "train_loss": None,
