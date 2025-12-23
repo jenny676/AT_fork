@@ -72,6 +72,21 @@ eval_ds = cifar.eval_dataset(batch_size=EVAL_BATCH_SIZE)
 
 train_iter = iter(train_ds)
 
+# -------------------------
+# Dataset for TRAIN evaluation (clean + robust)
+# -------------------------
+# Use the raw CIFAR training arrays (NO augmentation, NO repeat)
+train_eval_ds = tf.data.Dataset.from_tensor_slices(
+    (cifar.train_data.xs, cifar.train_data.ys)
+).batch(EVAL_BATCH_SIZE)
+
+# Optional: limit number of training examples evaluated per epoch (for speed)
+NUM_TRAIN_EVAL_EXAMPLES = None  # e.g. 5000, or None for full train set
+if NUM_TRAIN_EVAL_EXAMPLES is not None:
+    train_eval_ds = train_eval_ds.take(
+        int(math.ceil(NUM_TRAIN_EVAL_EXAMPLES / EVAL_BATCH_SIZE))
+    )
+
 # ---- model, optimizer, lr schedule
 # Convert step_size_schedule into boundaries/values for PiecewiseConstantDecay
 # step_size_schedule is list of [step, lr] pairs
