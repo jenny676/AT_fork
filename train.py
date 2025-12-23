@@ -171,41 +171,41 @@ def compute_dataset_metrics(sess, data_obj, attack_obj, batch_size, restarts):
 
 with tf.Session() as sess:
 
-  # initialize data augmentation (keeps internal train/eval pointers)
-  cifar = cifar10_input.AugmentedCIFAR10Data(raw_cifar, sess, model)
+   # initialize data augmentation (keeps internal train/eval pointers)
+   cifar = cifar10_input.AugmentedCIFAR10Data(raw_cifar, sess, model)
 
-  # optional: subsample training set according to config['train_frac']
-  train_frac = float(config.get('train_frac', 1.0))
-  if train_frac <= 0 or train_frac > 1.0:
-    raise ValueError("config['train_frac'] must be in (0,1]. Got: {}".format(train_frac))
+   # optional: subsample training set according to config['train_frac']
+   train_frac = float(config.get('train_frac', 1.0))
+   if train_frac <= 0 or train_frac > 1.0:
+      raise ValueError("config['train_frac'] must be in (0,1]. Got: {}".format(train_frac))
 
-  if train_frac < 1.0:
-    try:
+   if train_frac < 1.0:
+      try:
       xs = cifar.train_data.xs
       ys = cifar.train_data.ys
-    except AttributeError:
+      except AttributeError:
       raise RuntimeError("cifar.train_data does not expose .xs/.ys; adapt subsample code to your data loader.")
 
-    num_total = xs.shape[0]
-    num_keep = int(np.floor(num_total * train_frac))
-    if num_keep < 1:
+   num_total = xs.shape[0]
+   num_keep = int(np.floor(num_total * train_frac))
+   if num_keep < 1:
       raise ValueError("train_frac too small, resulting in zero examples to train on")
 
-    frac_seed = int(config.get('train_frac_seed', 0))
-    rng = np.random.RandomState(seed=(int(config.get('np_random_seed', 0)) + frac_seed))
+   frac_seed = int(config.get('train_frac_seed', 0))
+   rng = np.random.RandomState(seed=(int(config.get('np_random_seed', 0)) + frac_seed))
 
-    perm = rng.permutation(num_total)
-    keep_idx = np.sort(perm[:num_keep])  # sort to keep natural order if desired
+   perm = rng.permutation(num_total)
+   keep_idx = np.sort(perm[:num_keep])  # sort to keep natural order if desired
 
-    cifar.train_data.xs = xs[keep_idx].copy()
-    cifar.train_data.ys = ys[keep_idx].copy()
-    cifar.train_data.num_examples = cifar.train_data.xs.shape[0]
+   cifar.train_data.xs = xs[keep_idx].copy()
+   cifar.train_data.ys = ys[keep_idx].copy()
+   cifar.train_data.num_examples = cifar.train_data.xs.shape[0]
 
-    print("Subsampled training set: keeping {}/{} examples ({:.2%})".format(
+   print("Subsampled training set: keeping {}/{} examples ({:.2%})".format(
         num_keep, num_total, train_frac))
 
-  # Initialize the summary writer, global variables, and our time counter.
-  summary_writer = tf.summary.FileWriter(model_dir, sess.graph)
+   # Initialize the summary writer, global variables, and our time counter.
+   summary_writer = tf.summary.FileWriter(model_dir, sess.graph)
    # ensure metrics CSV has header
    init_metrics_csv()
    
