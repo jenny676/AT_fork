@@ -387,17 +387,27 @@ while step < max_num_training_steps:
 print("Running evaluation ...")
 # For evaluation we will use a dataset limited by config['num_eval_examples']
 num_eval_examples = int(config.get('num_eval_examples', 1000))
-EVAL_BATCH_SIZE = int(config.get('eval_batch_size', 256))
+EVAL_BATCH_SIZE = int(config.get('eval_batch_size', EVAL_BATCH_SIZE if 'EVAL_BATCH_SIZE' in globals() else 256))
+
 # slice eval dataset to requested number of examples
 eval_ds_full = cifar.eval_dataset(batch_size=EVAL_BATCH_SIZE)
-# take enough batches to cover num_eval_examples
 eval_ds_limited = eval_ds_full.take(int(math.ceil(num_eval_examples / EVAL_BATCH_SIZE)))
 
+# compute the actual number of examples we will evaluate (safe, doesn't consume eval_ds_limited)
+try:
+    # preferred: use dataset metadata if available
+    total_eval_available = int(getattr(cifar, "eval_data").num_examples)
+    n_examples = min(num_eval_examples, total_eval_available)
+except Exception:
+    # fallback: assume requested number (best-effort)
+    n_examples = num_eval_examples
+
+# run metrics (compute_dataset_metrics returns: clean_loss, clean_acc, robust_loss, robust_acc, elapsed_seconds)
 clean_loss, clean_acc, robust_loss, robust_acc, eval_time = compute_dataset_metrics(
     eval_ds_limited, eval_attack, batch_size=EVAL_BATCH_SIZE, restarts=EVAL_RESTARTS
 )
 
-print(f"Eval results (on {num_eval_examples} examples):")
+print(f"Eval results (on {n_examples} examples):")
 print(f"  clean loss: {clean_loss:.6f}, clean acc: {clean_acc:.4%}")
 print(f"  robust loss: {robust_loss:.6f}, robust acc: {robust_acc:.4%}")
 print(f"  eval time: {eval_time:.1f}s")
