@@ -222,9 +222,30 @@ for _ in range(max_num_training_steps):
 
     print(f"Step {step}: loss={train_loss_metric.result().numpy():.6f} acc={train_acc_metric.result().numpy():.4%} step_time={step_time:.3f}s")
 
-# --- tiny eval (on a few training examples)
-clean_loss, clean_acc, n_examples = compute_dataset_metrics(train_eval_ds.take(1), eval_attack, restarts=EVAL_RESTARTS)
-print(f"Smoke eval -> examples={n_examples} clean_loss={clean_loss:.6f} clean_acc={clean_acc:.4%}")
+# -----------------------
+# final evaluation (end of run)
+# -----------------------
+print("Running evaluation ...")
+
+# limit eval to a very small number of examples for smoke test
+eval_ds_limited = train_eval_ds.take(1)
+
+# count examples explicitly
+n_examples = 0
+for x_batch, _ in eval_ds_limited:
+    n_examples = int(x_batch.shape[0])
+
+# compute metrics (returns 5 values)
+clean_loss, clean_acc, robust_loss, robust_acc, eval_time = compute_dataset_metrics(
+    eval_ds_limited,
+    eval_attack,
+    restarts=EVAL_RESTARTS
+)
+
+print(f"Eval results (on {n_examples} examples):")
+print(f"  clean loss: {clean_loss:.6f}, clean acc: {clean_acc:.4%}")
+print(f"  robust loss: {robust_loss:.6f}, robust acc: {robust_acc:.4%}")
+print(f"  eval time: {eval_time:.1f}s")
 
 # --- write a single metrics line
 metrics = {
