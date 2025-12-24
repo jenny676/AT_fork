@@ -374,6 +374,14 @@ while step < max_num_training_steps:
         print(f"Epoch {epoch} summary: lr={lr_val:.6g} train_loss={train_clean_loss:.4f} train_acc={train_clean_acc:.4%} "
               f"train_robust_acc={train_robust_acc:.4%} test_robust_acc={test_robust_acc:.4%}")
 
+        # --- SAVE EPOCH checkpoint (so you can resume from any completed epoch) ---
+        try:
+            saved_epoch_ckpt = ckpt_manager.save()
+            print("Saved epoch checkpoint:", saved_epoch_ckpt)
+        except Exception as e:
+            # Do not crash training if checkpoint fails; log and continue
+            print("Warning: failed to save epoch checkpoint:", e)
+
         # Reset streaming metrics
         train_loss_metric.reset_state()
         train_acc_metric.reset_state()
