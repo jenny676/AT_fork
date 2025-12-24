@@ -202,11 +202,13 @@ def train_step(x_batch_adv, y_batch):
     train_loss_metric.update_state(loss)
     train_acc_metric.update_state(y_batch, logits)
 
-# ---- evaluation helper (computes clean + robust metrics over dataset)
+# -----------------------
+# evaluation helper: compute clean + robust metrics over a dataset
+# -----------------------
 def compute_dataset_metrics(dataset, attack_obj, batch_size, restarts):
     """
-    dataset: tf.data.Dataset yielding (x, y) (both tensors)
-    attack_obj: LinfPGDAttack instance
+    dataset: tf.data.Dataset yielding (x, y) (both tensors or numpy arrays)
+    attack_obj: LinfPGDAttack instance (expects numpy arrays or int32 labels)
     Returns: (clean_loss, clean_acc, robust_loss, robust_acc, elapsed_seconds)
     """
     t0 = time.time()
@@ -217,30 +219,46 @@ def compute_dataset_metrics(dataset, attack_obj, batch_size, restarts):
     N = 0
 
     for x_batch, y_batch in dataset:
-        # convert shapes to numpy counts
-        B = x_batch.shape[0]
+        # ensure numpy arrays for the attack, and int32 labels
+        # handle tf.Tensor or numpy arrays consistently
+        if isinstance(x_batch, tf.Tensor):
+            x_np = x_batch.numpy()
+        else:
+            x_np = x_batch
+        if isinstance(y_batch, tf.Tensor):
+            # cast to int32 numpy array
+            y_np = y_batch.numpy().astype('int32')
+        else:
+            # if it's already numpy, ensure dtype int32
+            y_np = y_batch.astype('int32')
+
+        B = x_np.shape[0]
         N += int(B)
 
-        # run clean forward
-        logits = model(x_batch, training=False)
-        per_ex_loss = loss_fn(y_batch, logits).numpy()
+        # run clean forward using tensors (convert x_np back to tensor)
+        x_batch_tensor = tf.convert_to_tensor(x_np, dtype=tf.float32)
+        logits = model(x_batch_tensor, training=False)
+        per_ex_loss = loss_fn(tf.convert_to_tensor(y_np, dtype=tf.int32), logits).numpy()
         preds = np.argmax(logits.numpy(), axis=1)
-        total_corr_clean += int(np.sum(preds == y_batch.numpy()))
+        total_corr_clean += int(np.sum(preds == y_np))
         total_clean_loss += float(np.sum(per_ex_loss))
 
-        # create adversarial examples (attack.perturb returns numpy array)
-        x_batch_adv = attack_obj.perturb(x_batch, y_batch, restarts=restarts)
-        # convert to tensor for evaluation
+        # create adversarial examples using numpy arrays (attack.perturb likely expects numpy)
+        x_batch_adv = attack_obj.perturb(x_np, y_np, restarts=restarts)
+
+        # convert to tensor if needed for evaluation
         if not isinstance(x_batch_adv, tf.Tensor):
             x_batch_adv = tf.convert_to_tensor(x_batch_adv, dtype=tf.float32)
 
         logits_adv = model(x_batch_adv, training=False)
-        per_ex_loss_adv = loss_fn(y_batch, logits_adv).numpy()
+        per_ex_loss_adv = loss_fn(tf.convert_to_tensor(y_np, dtype=tf.int32), logits_adv).numpy()
         preds_adv = np.argmax(logits_adv.numpy(), axis=1)
-        total_corr_robust += int(np.sum(preds_adv == y_batch.numpy()))
+        total_corr_robust += int(np.sum(preds_adv == y_np))
         total_robust_loss += float(np.sum(per_ex_loss_adv))
 
-    # average
+    if N == 0:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+
     return (
         total_clean_loss / float(N),
         float(total_corr_clean) / float(N),
