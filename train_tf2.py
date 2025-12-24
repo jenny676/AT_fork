@@ -159,6 +159,8 @@ summary_writer = tf.summary.create_file_writer(model_dir)
 METRICS_CSV = os.path.join(model_dir, "metrics.csv")
 METRICS_JSONL = os.path.join(model_dir, "metrics.jsonl")
 
+append_metrics_json_line = lambda d: open(METRICS_JSONL, "a").write(json.dumps(d) + "\n")
+
 def append_metrics(out_dir, metrics):
     fname = os.path.join(out_dir, "metrics.jsonl")
     with open(fname, "a") as fh:
@@ -399,7 +401,6 @@ metrics = {
     "test_robust_acc": robust_acc
 }
 # append to CSV/JSONL
-append_metrics_json_line = lambda d: open(METRICS_JSONL, "a").write(json.dumps(d) + "\n")
 append_metrics_json_line(metrics)
 append_metrics_csv([
     metrics["epoch"],
