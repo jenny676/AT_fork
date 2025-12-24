@@ -368,7 +368,7 @@ while step < max_num_training_steps:
 print("Running evaluation ...")
 # For evaluation we will use a dataset limited by config['num_eval_examples']
 num_eval_examples = int(config.get('num_eval_examples', 1000))
-EVAL_BATCH_SIZE = int(config.get('EVAL_BATCH_SIZE', 256))
+EVAL_BATCH_SIZE = int(config.get('eval_batch_size', 256))
 # slice eval dataset to requested number of examples
 eval_ds_full = cifar.eval_dataset(batch_size=EVAL_BATCH_SIZE)
 # take enough batches to cover num_eval_examples
