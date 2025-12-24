@@ -309,11 +309,11 @@ while step < max_num_training_steps:
 
         # 2) Compute test metrics (clean + robust)
         num_eval_examples = int(config.get('num_eval_examples', 1000))
-        eval_ds_full = cifar.eval_dataset(batch_size=eval_batch_size)
-        eval_ds_limited = eval_ds_full.take(int(math.ceil(num_eval_examples / eval_batch_size)))
+        eval_ds_full = cifar.eval_dataset(batch_size=EVAL_BATCH_SIZE)
+        eval_ds_limited = eval_ds_full.take(int(math.ceil(num_eval_examples / EVAL_BATCH_SIZE)))
 
         test_clean_loss, test_clean_acc, test_robust_loss, test_robust_acc, test_eval_time = compute_dataset_metrics(
-            eval_ds_limited, eval_attack, batch_size=eval_batch_size, restarts=EVAL_RESTARTS
+            eval_ds_limited, eval_attack, batch_size=EVAL_BATCH_SIZE, restarts=EVAL_RESTARTS
         )
 
         # current lr
