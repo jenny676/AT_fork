@@ -1,5 +1,5 @@
 {
-  "model_dir": "/content/drive/MyDrive/AT_smoke%",
+  "model_dir": "/content/drive/MyDrive/AT_smoke",
   "data_path": "cifar10_data",
   "training_batch_size": 128,
   "train_frac": 0.005,
@@ -22,5 +22,7 @@
   "num_eval_examples": 10,
   "eval_batch_size": 10,
   "eval_on_cpu": true,
-  "store_adv_path": "attack_smoke.npy"
+  "store_adv_path": "attack_smoke.npy",
+  "tf_random_seed": 0,
+  "np_random_seed": 0
 }
