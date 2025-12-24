@@ -1,5 +1,5 @@
 {
-  "model_dir": "/content/drive/MyDrive/AT_10%/smoke_epoch_fast",
+  "model_dir": "/tmp/AT_smoke",
   "data_path": "cifar10_data",
   "training_batch_size": 128,
   "train_frac": 0.005,
