@@ -120,7 +120,7 @@ class LinfPGDAttack:
         eps_pixels = tf.cast(self.epsilon, tf.float32) * scale
         step_pixels = tf.cast(self.step_size, tf.float32) * scale
 
-        y_t = tf.convert_to_tensor(y_np, dtype=tf.int64)
+        y_t = tf.convert_to_tensor(y_np, dtype=tf.int32)
 
         # We'll run `restarts` independent PGD runs and pick the per-example adversarial with maximum per-example loss.
         # Prepare accumulators on host (numpy) to keep best adv and best loss
@@ -149,4 +149,5 @@ class LinfPGDAttack:
         # final clipping to valid range (preserve scale)
         x_best = np.clip(x_best, 0.0, (255.0 if np.max(x_best) > 1.0 else 1.0)).astype(np.float32)
         return x_best
+
 
