@@ -116,7 +116,7 @@ model = Model(mode='train', num_classes=10, weight_decay=weight_decay)
 ckpt = tf.train.Checkpoint(step=tf.Variable(0, dtype=tf.int64),
                            optimizer=optimizer,
                            model=model)
-ckpt_manager = tf.train.CheckpointManager(ckpt, model_dir, max_to_keep=3)
+ckpt_manager = tf.train.CheckpointManager(ckpt, model_dir, max_to_keep=10)
 if ckpt_manager.latest_checkpoint:
     # 1) Build model variables (if not already built)
     dummy_x = tf.zeros([1, 32, 32, 3], dtype=tf.float32)
