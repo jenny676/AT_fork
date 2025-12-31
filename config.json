@@ -21,7 +21,7 @@
 
   "_comment": "===== EVAL CONFIGURATION =====",
   "eval_num_steps": 20,
-  "eval_restarts": 5,
+  "eval_restarts": 1,
   "num_eval_examples": 10000,
   "eval_batch_size": 200,
   "eval_on_cpu": false,
