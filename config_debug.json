@@ -1,3 +1,4 @@
+{
 "model_dir": "/content/AT_debug",
   "data_path": "cifar10_data",
   "tf_random_seed": 1,
@@ -23,3 +24,4 @@
   "random_start": true,
   "loss_func": "xent",
   "store_adv_path": ""
+}
