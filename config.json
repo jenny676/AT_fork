@@ -1,6 +1,6 @@
 {
   "_comment": "===== MODEL CONFIGURATION =====",
-  "model_dir": "/content/drive/MyDrive/AT_10%",
+  "model_dir": "/content/drive/MyDrive/TDL/AT/AT_10%",
 
   "_comment": "===== DATASET CONFIGURATION =====",
   "data_path": "cifar10_data",
