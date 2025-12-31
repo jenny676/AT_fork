@@ -1,6 +1,6 @@
 {
   "_comment": "===== MODEL CONFIGURATION =====",
-  "model_dir": "/content/drive/MyDrive/AT_5%",
+  "model_dir": "/content/drive/MyDrive/AT_10%",
 
   "_comment": "===== DATASET CONFIGURATION =====",
   "data_path": "cifar10_data",
@@ -16,7 +16,7 @@
   "weight_decay": 0.0002,
   "momentum": 0.9,
   "training_batch_size": 128,
-  "train_frac": 0.05,
+  "train_frac": 0.1,
   "train_frac_seed": 1,
 
   "_comment": "===== EVAL CONFIGURATION =====",
