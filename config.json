@@ -8,7 +8,7 @@
   "_comment": "===== TRAINING CONFIGURATION =====",
   "tf_random_seed": 1,
   "np_random_seed": 1,
-  "max_num_training_steps": 950,
+  "max_num_training_steps": 546,
   "num_output_steps": 200,
   "num_summary_steps": 200,
   "num_checkpoint_steps": 95,
